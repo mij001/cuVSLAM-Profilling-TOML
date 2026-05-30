@@ -14,6 +14,7 @@ _REGISTRY = {
     "euroc": ("cuvslam_runner.sources.euroc", "EurocSource"),
     "tum": ("cuvslam_runner.sources.tum", "TumSource"),
     "edex": ("cuvslam_runner.sources.edex", "EdexSource"),
+    "video": ("cuvslam_runner.sources.video", "VideoSource"),
     "realsense": ("cuvslam_runner.sources.realsense", "RealsenseSource"),
 }
 

@@ -132,6 +132,78 @@ def test_unknown_key_rejected():
         raise AssertionError("expected ConfigError for unknown key")
 
 
+def test_generic_imu_merge():
+    """image_folder + a generic IMU CSV yields interleaved, time-sorted events."""
+    from cuvslam_runner.sources.base import FrameEvent, ImuEvent
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root = os.path.join(tmp, "seq")
+        _make_dataset(root, n=3)  # frames at index ts 0,1,2 (default index mode)
+        imu_csv = os.path.join(root, "imu.csv")
+        with open(imu_csv, "w") as handle:
+            handle.write("t,gx,gy,gz,ax,ay,az\n")
+            # two IMU samples straddling each frame timestamp
+            for t in (0, 1, 1, 2):
+                handle.write(f"{t},0.01,0.02,0.03,0.0,0.0,9.81\n")
+
+        src = build_source({
+            "type": "image_folder",
+            "root": root,
+            "cameras": [{"images": "image_0/*.png"}],
+            "imu": {
+                "path": "imu.csv",
+                "format": "generic",
+                "columns": ["timestamp", "gx", "gy", "gz", "ax", "ay", "az"],
+                "timestamp_unit": "ns",
+            },
+        })
+        assert src.has_imu
+        events = list(src)
+        kinds = [("imu" if isinstance(e, ImuEvent) else "frame") for e in events]
+        ts = [e.timestamp_ns for e in events]
+        assert ts == sorted(ts), ts                       # strictly non-decreasing
+        assert kinds.count("imu") == 4 and kinds.count("frame") == 3
+        # On a tie, IMU precedes the frame so it is integrated up to that frame.
+        first_frame = kinds.index("frame")
+        assert kinds[0] == "imu" and first_frame >= 1
+        imu0 = next(e for e in events if isinstance(e, ImuEvent))
+        assert imu0.angular_velocities == [0.01, 0.02, 0.03]
+        assert imu0.linear_accelerations == [0.0, 0.0, 9.81]
+    print("test_generic_imu_merge: OK")
+
+
+def test_video_source_optional():
+    """Video source plumbing (skipped if opencv is unavailable)."""
+    try:
+        import cv2
+    except ModuleNotFoundError:
+        print("test_video_source_optional: SKIPPED (no opencv)")
+        return
+    from cuvslam_runner.sources.base import FrameEvent
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, "clip.avi")
+        H, W, N, FPS = 32, 64, 8, 20
+        vw = cv2.VideoWriter(path, cv2.VideoWriter_fourcc(*"FFV1"), FPS, (W, H))
+        for i in range(N):
+            vw.write(np.full((H, W, 3), (i * 20) % 255, np.uint8))
+        vw.release()
+
+        src = build_source({
+            "type": "video",
+            "cameras": [{"source": path, "split": "sbs", "grayscale": True}],
+            "timing": {"mode": "fps", "fps": FPS},
+        })
+        assert src.num_cameras == 2
+        events = list(src)
+        assert events and isinstance(events[0], FrameEvent)
+        assert len(events[0].images) == 2
+        assert events[0].images[0].shape == (H, W // 2)
+        ts = [e.timestamp_ns for e in events]
+        assert ts == sorted(ts) and ts[1] - ts[0] == int(1e9 / FPS)
+    print("test_video_source_optional: OK")
+
+
 def test_image_helpers():
     with tempfile.TemporaryDirectory() as tmp:
         # RGB -> BGR ordering
@@ -156,5 +228,7 @@ if __name__ == "__main__":
     test_config_and_source()
     test_timestamp_modes()
     test_unknown_key_rejected()
+    test_generic_imu_merge()
+    test_video_source_optional()
     test_image_helpers()
     print("\nAll smoke tests passed.")

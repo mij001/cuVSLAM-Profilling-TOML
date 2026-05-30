@@ -97,6 +97,16 @@ def run(config: Config) -> dict:
             f"produces {source.num_cameras} image streams."
         )
 
+    if config.odometry.odometry_mode == "Inertial" and rig_spec.imu is None:
+        raise ValueError(
+            "odometry_mode='Inertial' requires IMU calibration. Add a [rig.imu] table "
+            "(noise params + extrinsics), and supply IMU samples via [input.imu] for "
+            "image_folder, or use the 'euroc' source."
+        )
+    if getattr(source, "has_imu", False) and config.odometry.odometry_mode != "Inertial":
+        print("[runner] note: source provides IMU samples but odometry_mode is not "
+              "'Inertial'; IMU will be ignored.")
+
     rig = builders.build_rig(rig_spec)
     odom_cfg = builders.build_odometry_config(config.odometry)
     slam_cfg = builders.build_slam_config(config.slam)

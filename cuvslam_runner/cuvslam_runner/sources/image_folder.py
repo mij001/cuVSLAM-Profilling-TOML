@@ -24,6 +24,10 @@ Example ``[input]`` table::
       mode = "file"                        # file | filename | fps | index
       path = "times.txt"
       unit = "s"                           # s | ms | us | ns
+
+For inertial datasets, add an ``[input.imu]`` table (see csv_imu.py); IMU
+samples are merged with the frames in ascending-timestamp order so the source
+can drive ``odometry_mode = "Inertial"``.
 """
 
 from __future__ import annotations
@@ -33,7 +37,8 @@ import os
 from typing import Iterator, List, Optional
 
 from ..images import empty_image, load_depth, load_image
-from .base import FrameEvent, FrameSource
+from .base import FrameEvent, FrameSource, ImuEvent
+from .csv_imu import parse_imu_table
 
 
 def _sorted_glob(pattern: str) -> List[str]:
@@ -95,7 +100,7 @@ _UNIT_TO_NS = {"s": 1_000_000_000, "ms": 1_000_000, "us": 1_000, "ns": 1}
 
 class ImageFolderSource(FrameSource):
     def __init__(self, table: dict):
-        allowed = {"type", "root", "cameras", "timestamps", "depth_scale_to_uint16"}
+        allowed = {"type", "root", "cameras", "timestamps", "depth_scale_to_uint16", "imu"}
         unknown = set(table) - allowed
         if unknown:
             raise ValueError(f"[input] (image_folder): unknown key(s) {sorted(unknown)}")
@@ -117,6 +122,12 @@ class ImageFolderSource(FrameSource):
                 )
 
         self._timestamps_ns = self._build_timestamps(root, table.get("timestamps"))
+
+        # Optional IMU stream (enables Inertial mode on arbitrary datasets).
+        self._imu_events: List[ImuEvent] = []
+        if "imu" in table:
+            self._imu_events = parse_imu_table(root, table["imu"])
+        self.has_imu = bool(self._imu_events)
 
     # ----- timestamps ----------------------------------------------------- #
     def _build_timestamps(self, root: str, table: Optional[dict]) -> List[int]:
@@ -159,38 +170,54 @@ class ImageFolderSource(FrameSource):
     def __len__(self) -> int:
         return self.frame_count
 
-    def __iter__(self) -> Iterator[FrameEvent]:
+    def _load_frame(self, frame: int) -> FrameEvent:
         any_depth = any(s.depth for s in self.streams)
         any_mask = any(s.mask for s in self.streams)
 
-        for frame in range(self.frame_count):
-            images = [
-                load_image(s.images[frame], bgr=s.bgr, bayer=s.bayer)
-                for s in self.streams
-            ]
+        images = [
+            load_image(s.images[frame], bgr=s.bgr, bayer=s.bayer)
+            for s in self.streams
+        ]
 
-            depths = None
-            if any_depth:
-                depths = []
-                for s in self.streams:
-                    if s.depth and frame < len(s.depth):
-                        depths.append(load_depth(s.depth[frame], scale_to_uint16=self._depth_scale))
-                    else:
-                        depths.append(empty_image().astype("uint16"))
+        depths = None
+        if any_depth:
+            depths = []
+            for s in self.streams:
+                if s.depth and frame < len(s.depth):
+                    depths.append(load_depth(s.depth[frame], scale_to_uint16=self._depth_scale))
+                else:
+                    depths.append(empty_image().astype("uint16"))
 
-            masks = None
-            if any_mask:
-                masks = []
-                for s in self.streams:
-                    if s.mask and frame < len(s.mask):
-                        masks.append(load_image(s.mask[frame], bgr=False))
-                    else:
-                        masks.append(empty_image())
+        masks = None
+        if any_mask:
+            masks = []
+            for s in self.streams:
+                if s.mask and frame < len(s.mask):
+                    masks.append(load_image(s.mask[frame], bgr=False))
+                else:
+                    masks.append(empty_image())
 
-            yield FrameEvent(
-                timestamp_ns=self._timestamps_ns[frame],
-                images=images,
-                depths=depths,
-                masks=masks,
-                meta={"frame": frame},
-            )
+        return FrameEvent(
+            timestamp_ns=self._timestamps_ns[frame],
+            images=images,
+            depths=depths,
+            masks=masks,
+            meta={"frame": frame},
+        )
+
+    def __iter__(self) -> Iterator:
+        if not self._imu_events:
+            for frame in range(self.frame_count):
+                yield self._load_frame(frame)
+            return
+
+        # Merge frame and IMU events by timestamp (IMU first on ties so it is
+        # integrated up to the frame). Images are loaded lazily as frames yield.
+        schedule = [(self._timestamps_ns[f], 1, f) for f in range(self.frame_count)]
+        schedule += [(ev.timestamp_ns, 0, k) for k, ev in enumerate(self._imu_events)]
+        schedule.sort(key=lambda item: (item[0], item[1]))
+        for _ts, kind, payload in schedule:
+            if kind == 0:
+                yield self._imu_events[payload]
+            else:
+                yield self._load_frame(payload)

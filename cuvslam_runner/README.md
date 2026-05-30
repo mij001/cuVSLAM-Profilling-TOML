@@ -42,13 +42,26 @@ without a compiled cuVSLAM wheel; only `builders.py`/`runner.py` import `cuvslam
 
 ## Modes × inputs
 
-| `[input].type`  | Drives                                   | Typical `odometry_mode`            | Rig from           |
-|-----------------|-------------------------------------------|------------------------------------|--------------------|
-| `image_folder`  | KITTI, TartanGround, RobotCar, arbitrary | `Multicamera` / `Mono` / `RGBD`    | explicit `[rig]`   |
-| `euroc`         | EuRoC MAV (ASL)                          | `Inertial` / `Multicamera` / `Mono`| dataset yaml       |
-| `tum`           | TUM RGB-D                                | `RGBD`                             | rig yaml (+`[rig]`)|
-| `edex`          | TartanGround / R2B Galileo               | `Multicamera`                     | `.edex` JSON       |
-| `realsense`     | live Intel RealSense stereo              | `Multicamera`                     | device             |
+| `[input].type`  | Drives                                   | Recorded / Realtime | Modes it can drive                       | Rig from           |
+|-----------------|-------------------------------------------|---------------------|------------------------------------------|--------------------|
+| `image_folder`  | KITTI, TartanGround, RobotCar, arbitrary | recorded            | `Multicamera` / `Mono` / `RGBD` / **`Inertial`** (with `[input.imu]`) | explicit `[rig]`   |
+| `euroc`         | EuRoC MAV (ASL)                          | recorded            | `Inertial` / `Multicamera` / `Mono`      | dataset yaml       |
+| `tum`           | TUM RGB-D                                | recorded            | `RGBD`                                   | rig yaml (+`[rig]`)|
+| `edex`          | TartanGround / R2B Galileo (rosbag→EDEX) | recorded            | `Multicamera`                            | `.edex` JSON       |
+| `video`         | webcam, RTSP/HTTP stream, video file     | **both**            | `Multicamera` (sbs/tb split) / `Mono`    | explicit `[rig]`   |
+| `realsense`     | Intel RealSense stereo                   | realtime            | `Multicamera`                            | device             |
+
+**Any generic dataset, recorded or realtime, is covered:**
+
+- *Recorded, any layout* → `image_folder` (one glob per camera; optional `depth`,
+  `mask`, Bayer; timestamps from a file/filename/fps/index; optional `[input.imu]`
+  CSV for `Inertial`). This single source spans all four odometry modes.
+- *Recorded video files* (mp4/avi/…) → `video` with a file path.
+- *Realtime cameras/streams* → `video` ("0" device index, `rtsp://`/`http://`
+  URL, or a side-by-side stereo device via `split`) or `realsense`.
+- *ROS bags* → convert offline with the Isaac ROS EDEX extractor and load via
+  `edex` (the Python wheel does not read bags directly; live ROS uses the
+  separate Isaac ROS node).
 
 The four cuVSLAM odometry modes (`Multicamera`, `Inertial`, `RGBD`, `Mono`) and
 the SLAM layer are all selected purely through the TOML — see `configs/`.
@@ -83,7 +96,32 @@ root = "dataset/sequences/06"     # optional prefix for all globs
   path = "times.txt"              # for mode=file
   unit = "s"                      # s | ms | us | ns
   # fps = 30                      # for mode=fps
+
+  [input.imu]                     # optional -> enables odometry_mode = "Inertial"
+  path = "imu0/data.csv"
+  format = "euroc"                # euroc | generic
+  # generic:
+  #   columns = ["timestamp","gx","gy","gz","ax","ay","az"]
+  #   timestamp_unit = "ns"       # s|ms|us|ns
+  #   angular_unit = "rad"        # rad|deg
+  #   delimiter = ","; skip_header = true
 ```
+
+The generic OpenCV **`video`** source (recorded files or realtime devices/streams):
+
+```toml
+[input]
+type = "video"
+  [[input.cameras]]
+  source = "0"                    # device index | "rtsp://..."/"http://..." | "clip.mp4"
+  split = "sbs"                   # none | sbs | tb  (split one stereo frame into two)
+  grayscale = true                # convert to mono8 (default false -> BGR passthrough)
+  [input.timing]
+  mode = "auto"                   # auto | wallclock (realtime) | fps | index
+  fps = 30
+```
+IMU samples (image_folder) require a `[rig.imu]` table for the IMU calibration;
+the CSV supplies the samples, `[rig.imu]` supplies the noise model + extrinsics.
 
 ### `[[rig.cameras]]` and `[rig.imu]`
 Explicit calibration. If omitted, the source supplies it (euroc/tum/edex/realsense).
