@@ -44,6 +44,9 @@ def _check(config) -> int:
     print(f"multicam_mode   = {config.odometry.multicam_mode}")
     print(f"slam.enabled    = {config.slam.enabled}")
     print(f"output.trajectory = {config.output.trajectory or '(none)'}")
+    if config.eval.enabled:
+        print(f"eval.ground_truth = {config.eval.ground_truth} "
+              f"(format={config.eval.gt_format}, align={config.eval.align})")
 
     try:
         source = build_source(config.input)

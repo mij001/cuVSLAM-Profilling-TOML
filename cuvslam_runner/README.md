@@ -173,6 +173,49 @@ radii/steps) to localize in an existing map before tracking.
 `timestamp_unit` (`s`|`ms`|`us`|`ns`), `save_map` (folder, SLAM only),
 `visualize` (rerun), `print_every`.
 
+### `[eval]` — accuracy metrics vs ground truth
+Add this table to evaluate automatically after tracking (the run summary then
+includes `ate_rmse_m`, `avg_rte_pct`, `avg_re_deg`):
+
+```toml
+[eval]
+ground_truth = "state_groundtruth_estimate0/data.csv"  # resolved against input root
+gt_format = "euroc"             # euroc | tum | kitti
+align = "auto"                  # auto | se3 | sim3 | none  (auto: sim3 for Mono, else se3)
+apply_gt_extrinsic = "auto"     # auto | euroc_cam0 | none  (move EuRoC body-frame GT -> cam0)
+max_time_diff = 0.02            # s, GT/estimate association window
+rpe_distances = [1, 2, 4, 8, 16]  # metres; or "kitti" for 100..800; omit for auto
+report = "out/eval.txt"         # optional
+```
+
+Metrics reported (also available standalone via `python evaluate.py est.txt gt …`):
+
+| Metric | Meaning | Unit |
+|---|---|---|
+| **ATE / RMSE APE** | RMS absolute position error after rigid (SE3) / similarity (Sim3) alignment | m |
+| **avgRTE** | average relative translation error (RPE), drift per distance | % |
+| **RPE rotation** | relative rotation drift per distance | deg/m |
+| **avgRE** | average relative rotation error per segment | deg |
+
+RPE/avgRTE/avgRE are KITTI-style: relative pose errors over fixed travelled-distance
+segments, averaged over all start frames and all segment lengths. Alignment uses
+Umeyama (1991); Sim3 estimates a global scale for monocular runs.
+
+### Validated benchmark (EuRoC V1_01, stereo, cu13 wheel)
+`configs/euroc_v1_eval.toml` produces, against the Vicon ground truth
+(2912 frames, 0 failures, GT moved into the cam0 frame, SE3 alignment):
+
+```
+ATE / RMSE APE : 7.78 cm
+avgRTE         : 5.23 %
+RPE rotation   : 0.67 deg/m
+avgRE          : 2.34 deg
+```
+
+KITTI ATE/RPE works the same way with `gt_format = "kitti"` once you supply the
+KITTI ground-truth `poses/<seq>.txt` (a separate download from the odometry
+images), or the standalone `evaluate.py ... --gt-format kitti`.
+
 ## Notes
 - Only debug knobs (`debug_dump_directory`, `debug_imu_mode`) are intentionally
   not exposed.

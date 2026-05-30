@@ -224,6 +224,44 @@ def test_image_helpers():
     print("test_image_helpers: OK")
 
 
+def test_eval_metrics():
+    """ATE/RPE math: exact under rigid/similarity transforms, sane under drift."""
+    from scipy.spatial.transform import Rotation as Rot
+
+    from cuvslam_runner import eval as ev
+
+    N = 200
+    ts = np.arange(N) * int(1e9 / 20)
+    gt = np.tile(np.eye(4), (N, 1, 1))
+    for i in range(N):
+        a = i * 0.02
+        gt[i, :3, :3] = Rot.from_euler("y", a).as_matrix()
+        gt[i, :3, 3] = [5 * np.sin(a), 0.0, 5 * (1 - np.cos(a))]
+    gt_t = ev.Trajectory(ts, gt)
+
+    # (1) estimate = a rigid transform of GT -> ATE ~ 0 after se3 alignment
+    S = np.eye(4)
+    S[:3, :3] = Rot.from_euler("xyz", [0.3, -0.2, 1.1]).as_matrix()
+    S[:3, 3] = [3.0, -1.0, 2.0]
+    est = np.einsum("ij,njk->nik", S, gt)
+    r1 = ev.evaluate(ev.Trajectory(ts.copy(), est), gt_t, align="se3", rpe_distances=[1, 2, 4])
+    assert r1.ate["rmse"] < 1e-6, r1.ate["rmse"]
+    assert r1.rpe["avg_trans_pct"] < 1e-6, r1.rpe["avg_trans_pct"]
+
+    # (2) global scale -> sim3 recovers it and ATE ~ 0
+    est2 = est.copy()
+    est2[:, :3, 3] *= 2.5
+    r2 = ev.evaluate(ev.Trajectory(ts.copy(), est2), gt_t, align="sim3", rpe_distances=[1, 2, 4])
+    assert abs(r2.scale - 1 / 2.5) < 1e-3 and r2.ate["rmse"] < 1e-6
+
+    # (3) known monotonic drift -> positive, finite ATE/RPE
+    est3 = gt.copy()
+    est3[:, 0, 3] += np.linspace(0, 1.0, N)
+    r3 = ev.evaluate(ev.Trajectory(ts.copy(), est3), gt_t, align="none", rpe_distances=[1, 2, 4])
+    assert r3.ate["rmse"] > 0 and r3.rpe["avg_trans_pct"] > 0
+    print("test_eval_metrics: OK")
+
+
 if __name__ == "__main__":
     test_config_and_source()
     test_timestamp_modes()
@@ -231,4 +269,5 @@ if __name__ == "__main__":
     test_generic_imu_merge()
     test_video_source_optional()
     test_image_helpers()
+    test_eval_metrics()
     print("\nAll smoke tests passed.")

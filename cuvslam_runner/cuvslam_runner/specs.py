@@ -145,6 +145,21 @@ class OutputSpec:
 
 
 @dataclass
+class EvalSpec:
+    """Optional post-run evaluation against ground truth."""
+    enabled: bool = False
+    ground_truth: str = ""           # path to GT file
+    gt_format: str = "euroc"         # euroc | tum | kitti
+    gt_time_unit: str = "s"          # for tum GT
+    gt_fps: float = 10.0             # for kitti GT (index timing)
+    align: str = "auto"             # auto | se3 | sim3 | none  (auto: sim3 for Mono)
+    apply_gt_extrinsic: str = "auto"  # auto | euroc_cam0 | none
+    max_time_diff: float = 0.02      # s, association window
+    rpe_distances: Optional[List[float]] = None  # metres; None = auto, "kitti" handled in parser
+    report: str = ""                 # optional path to write the report text
+
+
+@dataclass
 class Config:
     run: RunSpec
     input: dict                      # raw [input] table (must contain "type")
@@ -152,3 +167,4 @@ class Config:
     slam: SlamSpec
     output: OutputSpec
     rig: Optional[RigSpec] = None    # explicit rig; if None the source provides it
+    eval: EvalSpec = field(default_factory=EvalSpec)

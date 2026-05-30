@@ -18,6 +18,7 @@ from .specs import (
     CameraSpec,
     Config,
     DistortionSpec,
+    EvalSpec,
     ImuSpec,
     LocalizeSpec,
     OdometrySpec,
@@ -232,6 +233,45 @@ def _parse_slam(table: Optional[dict]) -> SlamSpec:
     return spec
 
 
+def _parse_eval(table: Optional[dict]) -> EvalSpec:
+    spec = EvalSpec()
+    if table is None:
+        return spec
+    _check_keys(
+        table,
+        {"enabled", "ground_truth", "gt_format", "gt_time_unit", "gt_fps",
+         "align", "apply_gt_extrinsic", "max_time_diff", "rpe_distances", "report"},
+        "eval",
+    )
+    spec.enabled = bool(table.get("enabled", True))
+    if "ground_truth" in table:
+        spec.ground_truth = str(table["ground_truth"])
+    spec.gt_format = str(table.get("gt_format", "euroc"))
+    if spec.gt_format not in ("euroc", "tum", "kitti"):
+        raise ConfigError("[eval].gt_format must be euroc|tum|kitti")
+    spec.gt_time_unit = str(table.get("gt_time_unit", "s"))
+    spec.gt_fps = float(table.get("gt_fps", 10.0))
+    spec.align = str(table.get("align", "auto"))
+    if spec.align not in ("auto", "se3", "sim3", "none"):
+        raise ConfigError("[eval].align must be auto|se3|sim3|none")
+    spec.apply_gt_extrinsic = str(table.get("apply_gt_extrinsic", "auto"))
+    if spec.apply_gt_extrinsic not in ("auto", "euroc_cam0", "none"):
+        raise ConfigError("[eval].apply_gt_extrinsic must be auto|euroc_cam0|none")
+    spec.max_time_diff = float(table.get("max_time_diff", 0.02))
+    if "rpe_distances" in table:
+        rd = table["rpe_distances"]
+        if isinstance(rd, str):
+            if rd != "kitti":
+                raise ConfigError('[eval].rpe_distances string must be "kitti"')
+            spec.rpe_distances = [100, 200, 300, 400, 500, 600, 700, 800]
+        else:
+            spec.rpe_distances = [float(x) for x in rd]
+    spec.report = str(table.get("report", ""))
+    if spec.enabled and not spec.ground_truth:
+        raise ConfigError("[eval] is enabled but no 'ground_truth' path was given.")
+    return spec
+
+
 def _parse_run(table: Optional[dict]) -> RunSpec:
     spec = RunSpec()
     if table is None:
@@ -281,7 +321,7 @@ def load_config(path: str) -> Config:
     with open(path, "rb") as handle:
         data: dict[str, Any] = tomllib.load(handle)
 
-    _check_keys(data, {"run", "input", "rig", "odometry", "slam", "output"}, "<root>")
+    _check_keys(data, {"run", "input", "rig", "odometry", "slam", "output", "eval"}, "<root>")
 
     if "input" not in data:
         raise ConfigError("Missing required [input] table.")
@@ -296,4 +336,5 @@ def load_config(path: str) -> Config:
         odometry=_parse_odometry(data.get("odometry")),
         slam=_parse_slam(data.get("slam")),
         output=_parse_output(data.get("output")),
+        eval=_parse_eval(data.get("eval")),
     )

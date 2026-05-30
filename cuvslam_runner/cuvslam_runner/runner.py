@@ -120,6 +120,12 @@ def run(config: Config) -> dict:
         if config.output.trajectory else None
     viz = make_visualizer(config.output.visualize)
 
+    # In-memory estimate (ns timestamps) for optional post-run evaluation.
+    collect_eval = config.eval.enabled
+    est_ts: List[int] = []
+    est_tr: List[list] = []
+    est_qt: List[list] = []
+
     events = iter(source)
 
     # Optional: localize in an existing map first.
@@ -157,8 +163,13 @@ def run(config: Config) -> dict:
 
         odom_pose = pose_estimate.world_from_rig.pose
         chosen = slam_pose if (pose_source == "slam" and slam_pose is not None) else odom_pose
-        if writer is not None and chosen is not None:
-            writer.add(event.timestamp_ns, chosen.translation, chosen.rotation)
+        if chosen is not None:
+            if writer is not None:
+                writer.add(event.timestamp_ns, chosen.translation, chosen.rotation)
+            if collect_eval:
+                est_ts.append(int(event.timestamp_ns))
+                est_tr.append(list(chosen.translation))
+                est_qt.append(list(chosen.rotation))
 
         if viz.enabled:
             obs = tracker.get_last_observations(0) if config.odometry.enable_observations_export else None
@@ -207,8 +218,81 @@ def run(config: Config) -> dict:
         "pose_source": pose_source,
         "slam_enabled": config.slam.enabled,
     }
+
+    if collect_eval:
+        try:
+            result = _run_eval(config, est_ts, est_tr, est_qt)
+            summary["ate_rmse_m"] = round(result.ate["rmse"], 5)
+            summary["avg_rte_pct"] = round(result.rpe["avg_trans_pct"], 4)
+            summary["avg_re_deg"] = round(result.rpe["avg_rot_deg"], 4)
+        except Exception as exc:  # noqa: BLE001 - evaluation must not crash a run
+            print(f"[eval] evaluation failed: {exc}")
+
     print(f"[runner] done: {summary}")
     return summary
+
+
+def _run_eval(config: Config, ts: List[int], tr: List[list], qt: List[list]):
+    """Build trajectories and compute ATE/RPE; print (and optionally save) report."""
+    import os
+
+    import numpy as np
+
+    from . import eval as ev
+
+    spec = config.eval
+    # Resolve GT path relative to the input root when not absolute.
+    gt_path = spec.ground_truth
+    root = config.input.get("path") or config.input.get("root") or ""
+    if root and not os.path.isabs(gt_path):
+        cand = os.path.join(root, gt_path)
+        gt_path = cand if os.path.exists(cand) else gt_path
+    if not os.path.exists(gt_path):
+        raise FileNotFoundError(f"ground truth not found: {gt_path}")
+
+    if spec.gt_format == "euroc":
+        gt = ev.load_gt_euroc(gt_path)
+    elif spec.gt_format == "tum":
+        gt = ev.load_gt_tum(gt_path, spec.gt_time_unit)
+    else:
+        gt = ev.load_gt_kitti(gt_path, spec.gt_fps)
+
+    # Move EuRoC body-frame GT into the cam0 frame so it matches cuVSLAM output.
+    apply_ext = spec.apply_gt_extrinsic
+    if apply_ext == "auto":
+        apply_ext = "euroc_cam0" if (spec.gt_format == "euroc" and config.input["type"] == "euroc") else "none"
+    if apply_ext == "euroc_cam0":
+        sensor_yaml = os.path.join(root, "cam0", "sensor.yaml")
+        if os.path.exists(sensor_yaml):
+            T = ev.read_euroc_cam0_extrinsic(sensor_yaml)
+            gt = ev.apply_right_extrinsic(gt, T)
+        else:
+            print(f"[eval] note: {sensor_yaml} not found; GT left in body frame.")
+
+    # Build the estimate trajectory.
+    poses = np.tile(np.eye(4), (len(ts), 1, 1))
+    for i, (t, q) in enumerate(zip(tr, qt)):
+        poses[i] = ev._pose(t, q)
+    est = ev.Trajectory(np.array(ts, dtype=np.int64), poses)
+
+    align = spec.align
+    if align == "auto":
+        align = "sim3" if config.odometry.odometry_mode == "Mono" else "se3"
+
+    result = ev.evaluate(
+        est, gt,
+        align=align,
+        max_diff_ns=int(spec.max_time_diff * 1e9),
+        rpe_distances=spec.rpe_distances,
+    )
+    report = ev.format_report(result, title=os.path.basename(gt_path))
+    print("\n" + report + "\n")
+    if spec.report:
+        os.makedirs(os.path.dirname(os.path.abspath(spec.report)), exist_ok=True)
+        with open(spec.report, "w") as handle:
+            handle.write(report + "\n")
+        print(f"[eval] report written to {spec.report}")
+    return result
 
 
 def _aligned(items: Optional[List[np.ndarray]], n: int, filler: np.ndarray) -> List[np.ndarray]:
