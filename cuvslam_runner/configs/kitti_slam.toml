@@ -1,0 +1,50 @@
+# KITTI stereo + SLAM (loop closure, map building & saving).
+# Same input/rig as kitti_stereo.toml, but the presence of the [slam] table
+# enables the SLAM layer on top of odometry.
+
+[run]
+verbosity = 1
+sleep_ms = 10            # give the async SLAM thread time to catch up
+
+[input]
+type = "image_folder"
+root = "../examples/kitti/dataset/sequences/06"
+
+  [[input.cameras]]
+  images = "image_0/*.png"
+
+  [[input.cameras]]
+  images = "image_1/*.png"
+
+  [input.timestamps]
+  mode = "file"
+  path = "times.txt"
+  unit = "s"
+
+[odometry]
+odometry_mode = "Multicamera"
+rectified_stereo_camera = true
+async_sba = false
+enable_final_landmarks_export = true
+
+[slam]
+enabled = true
+sync_mode = false        # async (recommended); set true for deterministic localization
+
+[[rig.cameras]]
+size = [1241, 376]
+focal = [718.856, 718.856]
+principal = [607.1928, 185.2157]
+
+[[rig.cameras]]
+size = [1241, 376]
+focal = [718.856, 718.856]
+principal = [607.1928, 185.2157]
+  [rig.cameras.rig_from_camera]
+  translation = [0.537150653, 0.0, 0.0]
+
+[output]
+trajectory = "out/kitti_06_slam_tum.txt"
+pose_source = "slam"
+save_map = "out/kitti_06_map"
+visualize = false
