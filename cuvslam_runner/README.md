@@ -1,224 +1,628 @@
-# cuvslam_runner — run cuVSLAM from a single TOML file
+# cuvslam_runner
 
-A small, config-driven system that runs the `cuvslam` Python module end-to-end.
-**The only input is one TOML file.** It declares the input source (dataset
-folder, multi-camera rig, live camera, …), the camera/IMU rig, every Odometry
-and SLAM knob, and where to write the output trajectory/map.
+**Run NVIDIA cuVSLAM end-to-end from a single TOML file — any input, any mode,
+with built-in trajectory evaluation against ground truth.**
 
-```
-python run.py configs/kitti_stereo.toml            # run it
-python run.py configs/kitti_stereo.toml --check     # validate config only (no cuvslam needed)
-# or, as a module:
-python -m cuvslam_runner configs/euroc_inertial.toml
-```
-
-## Install
+`cuvslam_runner` is a thin, declarative harness around the `cuvslam` Python
+module. One TOML file fully describes a run: where the images/IMU come from
+(recorded dataset *or* live camera/stream), the camera+IMU rig, every Odometry
+and SLAM knob, the output trajectory/map, and an optional accuracy evaluation
+(ATE / RPE / avgRTE / avgRE) against ground truth. Nothing else is needed — no
+per-dataset Python script.
 
 ```bash
+python run.py configs/kitti_stereo.toml            # run a config
+python run.py configs/euroc_v1_eval.toml            # run + evaluate vs ground truth
+python run.py configs/kitti_stereo.toml --check     # validate config only (no cuvslam import)
+python -m cuvslam_runner configs/tum_rgbd.toml      # equivalent module form
+python evaluate.py est.txt gt.csv --gt-format euroc # evaluate an existing trajectory
+```
+
+---
+
+## Table of contents
+
+- [Why this exists](#why-this-exists)
+- [Installation](#installation)
+- [Quick start](#quick-start)
+- [Architecture](#architecture)
+- [Input sources](#input-sources)
+- [The TOML reference](#the-toml-reference)
+  - [`[run]`](#run)
+  - [`[input]`](#input)
+  - [`[rig]` — cameras and IMU](#rig--cameras-and-imu)
+  - [`[odometry]`](#odometry)
+  - [`[slam]`](#slam)
+  - [`[output]`](#output)
+  - [`[eval]`](#eval)
+- [Choosing a mode](#choosing-a-mode)
+- [Evaluation metrics explained](#evaluation-metrics-explained)
+- [Validated benchmark results](#validated-benchmark-results)
+- [Bundled configs](#bundled-configs)
+- [Recipes](#recipes)
+- [Coordinate conventions](#coordinate-conventions)
+- [Extending the system](#extending-the-system)
+- [Testing](#testing)
+- [Troubleshooting](#troubleshooting)
+
+---
+
+## Why this exists
+
+The cuVSLAM repo ships one bespoke Python script per dataset (KITTI, EuRoC, TUM,
+TartanGround, RealSense, ZED, …). They duplicate the same scaffolding — build a
+rig, configure the tracker, loop over frames, call `track()`, collect poses.
+
+`cuvslam_runner` factors that into a single, reusable engine driven by
+configuration. The same binary runs the paper's **benchmark datasets**, the
+**repo's example datasets**, and **arbitrary external data** (recorded folders,
+video files, USB/IP cameras), and then **scores the result** against ground
+truth. Adapting to a new dataset means writing a TOML file, not code.
+
+---
+
+## Installation
+
+`cuvslam_runner` needs the `cuvslam` wheel plus a few common Python packages.
+
+```bash
+# 1) core dependencies for the harness
 pip install -r requirements.txt
-# plus the cuVSLAM wheel itself:
-pip install cuvslam-*.whl
+
+# 2) the cuVSLAM module itself (from the releases page or your local build)
+pip install cuvslam-15.0.0+cu13-cp310-cp310-manylinux_2_35_x86_64.whl
 ```
 
-`--check` works without `cuvslam` installed — it parses the TOML, wires the
-input source, resolves the rig, and counts frames. Useful for validating a
-config before launching a real run.
+**Dependencies**
 
-## How it fits together
+| Package | Needed for |
+|---|---|
+| numpy, pillow | core (image loading, math) |
+| pyyaml | EuRoC / TUM calibration parsing |
+| scipy | rotations, Umeyama alignment (rig + eval) |
+| tomli | TOML parsing on Python < 3.11 (3.11+ has `tomllib`) |
+| `cuvslam` | the tracker (only imported at run time, not for `--check`) |
+| rerun-sdk *(optional)* | `[output].visualize = true` |
+| opencv-python *(optional)* | `type = "video"`, and Bayer demosaicing |
+| pyrealsense2 *(optional)* | `type = "realsense"` live camera |
+
+> `--check` and the whole config/parsing/evaluation layer work **without
+> `cuvslam` installed**, which makes configs easy to validate anywhere.
+
+---
+
+## Quick start
+
+```bash
+# Stereo visual odometry on a KITTI sequence
+python run.py configs/kitti_stereo.toml
+
+# EuRoC V1_01 stereo, then ATE/RPE against the Vicon ground truth
+python run.py configs/euroc_v1_eval.toml
+
+# A live monocular webcam (needs opencv-python)
+python run.py configs/webcam_mono.toml
+```
+
+Every run prints a one-line summary, e.g.:
 
 ```
-TOML ─► config.py ─► specs (plain dataclasses, no cuvslam)
-                         │
-        sources/* ───────┤ (image_folder | euroc | tum | edex | realsense)
-        produce FrameEvent / ImuEvent streams + an optional RigSpec
-                         │
-        builders.py ─────► turns specs into live cuvslam objects (only file importing cuvslam)
-                         │
-        runner.py ───────► Tracker loop ─► trajectory.py (TUM file) + viz.py (rerun)
+[runner] done: {'frames_tracked': 2912, 'track_failures': 0,
+                'pose_source': 'odometry', 'slam_enabled': False,
+                'ate_rmse_m': 0.07777, 'avg_rte_pct': 5.229, 'avg_re_deg': 2.3388}
 ```
 
-The split means dataset parsing and config validation are fully testable
-without a compiled cuVSLAM wheel; only `builders.py`/`runner.py` import `cuvslam`.
+---
 
-## Modes × inputs
+## Architecture
 
-| `[input].type`  | Drives                                   | Recorded / Realtime | Modes it can drive                       | Rig from           |
-|-----------------|-------------------------------------------|---------------------|------------------------------------------|--------------------|
-| `image_folder`  | KITTI, TartanGround, RobotCar, arbitrary | recorded            | `Multicamera` / `Mono` / `RGBD` / **`Inertial`** (with `[input.imu]`) | explicit `[rig]`   |
-| `euroc`         | EuRoC MAV (ASL)                          | recorded            | `Inertial` / `Multicamera` / `Mono`      | dataset yaml       |
-| `tum`           | TUM RGB-D                                | recorded            | `RGBD`                                   | rig yaml (+`[rig]`)|
-| `edex`          | TartanGround / R2B Galileo (rosbag→EDEX) | recorded            | `Multicamera`                            | `.edex` JSON       |
-| `video`         | webcam, RTSP/HTTP stream, video file     | **both**            | `Multicamera` (sbs/tb split) / `Mono`    | explicit `[rig]`   |
-| `realsense`     | Intel RealSense stereo                   | realtime            | `Multicamera`                            | device             |
+The design keeps a hard wall between *parsing* (no cuVSLAM) and *construction*
+(cuVSLAM), so configs and datasets can be validated/tested without a built wheel.
 
-**Any generic dataset, recorded or realtime, is covered:**
+```
+                         one TOML file
+                              │
+                  ┌───────────▼────────────┐
+                  │       config.py         │  parse + validate -> dataclasses
+                  └───────────┬────────────┘
+                              │  specs.py  (plain dataclasses, NO cuvslam)
+        ┌─────────────────────┼─────────────────────────────┐
+        │                     │                             │
+ ┌──────▼───────┐    ┌────────▼─────────┐          ┌─────────▼────────┐
+ │  sources/*   │    │   builders.py    │          │     eval.py      │
+ │ FrameEvent / │    │  specs -> live   │          │ ATE / RPE / ...  │
+ │ ImuEvent +   │    │  cuvslam objects │          │ (no cuvslam)     │
+ │ RigSpec      │    │ (ONLY cuvslam    │          └─────────▲────────┘
+ └──────┬───────┘    │     importer)    │                    │
+        │            └────────┬─────────┘                    │
+        └─────────────┐       │                              │
+                  ┌───▼───────▼──────┐    poses (ns)          │
+                  │     runner.py    │────────────────────────┘
+                  │  Tracker loop    │
+                  └───┬─────────┬────┘
+                      │         │
+              trajectory.py   viz.py
+              (TUM file)      (rerun, optional)
+```
 
-- *Recorded, any layout* → `image_folder` (one glob per camera; optional `depth`,
-  `mask`, Bayer; timestamps from a file/filename/fps/index; optional `[input.imu]`
-  CSV for `Inertial`). This single source spans all four odometry modes.
-- *Recorded video files* (mp4/avi/…) → `video` with a file path.
-- *Realtime cameras/streams* → `video` ("0" device index, `rtsp://`/`http://`
-  URL, or a side-by-side stereo device via `split`) or `realsense`.
-- *ROS bags* → convert offline with the Isaac ROS EDEX extractor and load via
-  `edex` (the Python wheel does not read bags directly; live ROS uses the
-  separate Isaac ROS node).
+**Module map**
 
-The four cuVSLAM odometry modes (`Multicamera`, `Inertial`, `RGBD`, `Mono`) and
-the SLAM layer are all selected purely through the TOML — see `configs/`.
+| File | Responsibility |
+|---|---|
+| `config.py` | Load TOML, validate keys, build `specs` dataclasses. Rejects unknown keys with helpful messages. |
+| `specs.py` | Dependency-free dataclasses: `RigSpec`, `CameraSpec`, `OdometrySpec`, `SlamSpec`, `EvalSpec`, … |
+| `sources/` | Input adapters; each yields `FrameEvent`/`ImuEvent` and may provide a `RigSpec`. |
+| `builders.py` | The only module importing `cuvslam`; turns specs into `Rig`, `OdometryConfig`, `SlamConfig`, etc. |
+| `runner.py` | Drives the `Tracker` loop, collects poses, writes outputs, runs eval. |
+| `trajectory.py` | TUM-format trajectory writer (`ts tx ty tz qx qy qz qw`). |
+| `eval.py` | Association, Umeyama alignment, ATE/RPE metrics; standalone-capable. |
+| `images.py` | Robust image loading (mono/RGB→BGR, uint16 depth, Bayer demosaic). |
+| `viz.py` | Optional, generic Rerun visualization (degrades to a no-op). |
+| `cli.py` / `run.py` / `__main__.py` | Entry points and `--check` dry run. |
 
-## TOML reference
+---
+
+## Input sources
+
+Selected by `[input].type`. The first three columns answer your core question —
+**recorded vs realtime, and where calibration comes from**.
+
+| `type` | Recorded / Realtime | Calibration from | Typical datasets / hardware |
+|---|---|---|---|
+| `image_folder` | recorded | explicit `[rig]` | KITTI, TartanGround, Oxford RobotCar, **any** image-per-file dataset; optional `[input.imu]` enables Inertial |
+| `euroc`        | recorded | dataset `sensor.yaml` (+IMU) | EuRoC MAV (Machine Hall, Vicon Room) |
+| `tum`          | recorded | rig yaml | TUM RGB-D |
+| `edex`         | recorded | `.edex` JSON | TartanGround, R2B Galileo (rosbag→edex) |
+| `video`        | **both** | explicit `[rig]` | recorded `.mp4`/`.avi`; live webcam (`"0"`); IP/RTSP stream |
+| `realsense`    | realtime | device | Intel RealSense stereo (live) |
+
+Two of these are deliberately *generic* and cover "any dataset you throw at it":
+
+- **`image_folder`** — N camera folders matched by sorted filename order, with
+  optional per-camera `depth` and `mask` streams, optional Bayer demosaic, and
+  flexible timestamping (from a file, from filenames, from FPS, or frame index).
+  Add an `[input.imu]` CSV and it drives **Inertial** mode too.
+- **`video`** — anything `cv2.VideoCapture` opens: a file (recorded), a device
+  index like `"0"` (live), or an `rtsp://`/`http://` URL (live stream). A packed
+  stereo frame can be split side-by-side (`split = "sbs"`) or top/bottom
+  (`split = "tb"`) into two camera images.
+
+---
+
+## The TOML reference
+
+A configuration has up to seven tables. Only `[input]` is mandatory; `[rig]` is
+required unless the source supplies calibration. Unknown keys are rejected.
 
 ### `[run]`
-| key | default | meaning |
-|---|---|---|
-| `verbosity` | `0` | `cuvslam.set_verbosity` (0 silent … 3 info) |
-| `warm_up_gpu` | `false` | call `warm_up_gpu()` before tracking |
-| `start_index` | `0` | skip the first N frame events |
-| `max_frames` | `0` | stop after N tracked frames (0 = all) |
-| `sleep_ms` | `0` | pause between frames (helps async SLAM catch up) |
+
+Runtime behaviour (maps to library globals + loop control).
+
+| Key | Type | Default | Meaning |
+|---|---|---|---|
+| `verbosity` | int | `0` | `cuvslam.set_verbosity` (0 silent, 1 error, 2 warn, 3 info) |
+| `warm_up_gpu` | bool | `false` | call `cuvslam.warm_up_gpu()` before tracking (reduces first-frame latency) |
+| `start_index` | int | `0` | skip the first N **frame** events |
+| `max_frames` | int | `0` | stop after N tracked frames (0 = all) |
+| `sleep_ms` | float | `0` | sleep between frames; helps the async SLAM thread keep up |
 
 ### `[input]`
-`type` selects the source; remaining keys are source-specific (documented at the
-top of each file in `cuvslam_runner/sources/`). The generic `image_folder`:
 
+`type` selects the source; the remaining keys are source-specific.
+
+**`image_folder`**
 ```toml
 [input]
 type = "image_folder"
-root = "dataset/sequences/06"     # optional prefix for all globs
-  [[input.cameras]]
-  images = "image_0/*.png"        # required glob, sorted = frame order
-  depth  = "depth_0/*.png"        # optional (uint16), enables depths input
-  mask   = "mask_0/*.png"         # optional dynamic masks
-  bayer  = "GBRG"                 # optional raw-Bayer demosaic
-  bgr    = true                   # RGB->BGR on load (default true)
-  [input.timestamps]
-  mode = "file"                   # index | fps | file | filename
-  path = "times.txt"              # for mode=file
-  unit = "s"                      # s | ms | us | ns
-  # fps = 30                      # for mode=fps
+root = "dataset/sequences/06"      # optional path prefix for every glob below
+depth_scale_to_uint16 = 1.0        # multiply depth pixels before casting to uint16
 
-  [input.imu]                     # optional -> enables odometry_mode = "Inertial"
+  [[input.cameras]]                # one table per camera, in rig order
+  images = "image_0/*.png"         # REQUIRED glob; sorted order == frame order
+  depth  = "depth_0/*.png"         # optional uint16 depth (enables `depths`)
+  mask   = "mask_0/*.png"          # optional dynamic masks (uint8)
+  bayer  = "GBRG"                  # optional: demosaic raw Bayer -> BGR (needs opencv)
+  bgr    = true                    # RGB->BGR on load (default true; matches examples)
+
+  [input.timestamps]
+  mode = "file"                    # index | fps | file | filename
+  path = "times.txt"               # for mode=file (one value per line)
+  unit = "s"                       # s | ms | us | ns  (file/filename)
+  # fps = 30                       # for mode=fps
+
+  [input.imu]                      # OPTIONAL -> enables odometry_mode="Inertial"
   path = "imu0/data.csv"
-  format = "euroc"                # euroc | generic
-  # generic:
+  format = "euroc"                 # euroc | generic
+  # generic only:
   #   columns = ["timestamp","gx","gy","gz","ax","ay","az"]
-  #   timestamp_unit = "ns"       # s|ms|us|ns
-  #   angular_unit = "rad"        # rad|deg
-  #   delimiter = ","; skip_header = true
+  #   timestamp_unit = "ns"        # s | ms | us | ns
+  #   delimiter = ","
+  #   skip_header = true
+  #   angular_unit = "rad"         # rad | deg
 ```
 
-The generic OpenCV **`video`** source (recorded files or realtime devices/streams):
+**`euroc`** — builds the stereo rig + IMU from `mav0/cam0|cam1|imu0/sensor.yaml`.
+```toml
+[input]
+type = "euroc"
+path = "datasets/euroc/.../V1_01_easy/mav0"
+use_imu = true                     # interleave IMU samples (for Inertial); false = vision only
+```
 
+**`tum`** — associates `rgb.txt`/`depth.txt` by timestamp; reads intrinsics/scale from the rig yaml.
+```toml
+[input]
+type = "tum"
+path = "datasets/rgbd_dataset_freiburg3_long_office_household"
+rig_yaml = "freiburg3_rig.yaml"    # optional; supplies a 1-camera rig + depth scale
+max_time_diff = 0.02               # s, rgb/depth association window
+max_gap = 0.5                      # s, skip across large temporal gaps
+```
+
+**`edex`** — multi-camera rig from a `.edex` JSON; images in folders or a jsonl manifest.
+```toml
+[input]
+type = "edex"
+edex = "tartan_ground.edex"
+layout = "folders"                 # folders | jsonl
+data_root = "dataset/.../P2000"
+camera_names = ["lcam_front", "rcam_front", ...]   # folders layout
+image_pattern = "{frame:06d}_{name}.png"           # folders layout
+```
+
+**`video`** — recorded files or live devices/streams via OpenCV.
 ```toml
 [input]
 type = "video"
   [[input.cameras]]
-  source = "0"                    # device index | "rtsp://..."/"http://..." | "clip.mp4"
-  split = "sbs"                   # none | sbs | tb  (split one stereo frame into two)
-  grayscale = true                # convert to mono8 (default false -> BGR passthrough)
+  source = "0"                     # device index | file path | rtsp://… | http://…
+  split = "sbs"                    # none | sbs | tb  (split a packed stereo frame)
+  grayscale = true                 # convert to mono8 (else BGR passthrough)
   [input.timing]
-  mode = "auto"                   # auto | wallclock (realtime) | fps | index
-  fps = 30
+  mode = "auto"                    # auto | wallclock | fps | index
+  fps = 30                         # for mode=fps (and auto on files lacking metadata)
+  max_frames = 0                   # stop after N (0 = until end/stopped)
 ```
-IMU samples (image_folder) require a `[rig.imu]` table for the IMU calibration;
-the CSV supplies the samples, `[rig.imu]` supplies the noise model + extrinsics.
 
-### `[[rig.cameras]]` and `[rig.imu]`
-Explicit calibration. If omitted, the source supplies it (euroc/tum/edex/realsense).
-A camera:
+**`realsense`** — live Intel RealSense stereo (rig read from the device).
+```toml
+[input]
+type = "realsense"
+width = 640
+height = 360
+fps = 30
+warmup_frames = 60
+disable_emitter = true             # the IR dot pattern hurts feature tracking
+```
 
+### `[rig]` — cameras and IMU
+
+Explicit calibration via `[[rig.cameras]]` and an optional `[rig.imu]`.
+**Required** when the source can't provide it
+(`image_folder`, `video`); **optional override** otherwise.
+
+A camera (the `[rig.cameras.…]` sub-tables attach to the most recent `[[rig.cameras]]`):
 ```toml
 [[rig.cameras]]
-size = [1241, 376]                # [width, height]
-focal = [718.856, 718.856]        # [fx, fy]
-principal = [607.19, 185.22]      # [cx, cy]
-  [rig.cameras.rig_from_camera]   # extrinsics (camera -> rig)
-  rotation = [0,0,0,1]            # quaternion x,y,z,w
-  translation = [0.537,0,0]
+size = [1241, 376]                 # [width, height] in pixels
+focal = [718.856, 718.856]         # [fx, fy]
+principal = [607.19, 185.22]       # [cx, cy]
+  [rig.cameras.rig_from_camera]    # extrinsics: camera frame -> rig frame
+  rotation = [0, 0, 0, 1]          # quaternion [x, y, z, w]
+  translation = [0.537, 0, 0]      # metres
   [rig.cameras.distortion]
-  model = "Pinhole"               # Pinhole|Fisheye|Brown|Polynomial
+  model = "Pinhole"                # Pinhole(0) | Fisheye(4) | Brown(5) | Polynomial(8)
   parameters = []
-# border_top/bottom/left/right    # static feature masks (pixels)
+# static feature masks (pixels), optional:
+# border_top = 0 ; border_bottom = 0 ; border_left = 0 ; border_right = 0
 ```
 
+An IMU (required for `odometry_mode = "Inertial"`):
 ```toml
-[rig.imu]                         # required for odometry_mode = "Inertial"
-gyroscope_noise_density = 1.0e-4
-accelerometer_noise_density = 1.0e-3
-gyroscope_random_walk = 1.0e-6
-accelerometer_random_walk = 1.0e-5
-frequency = 200.0
+[rig.imu]
+gyroscope_noise_density = 1.6968e-04      # rad/(s·√Hz)
+accelerometer_noise_density = 2.0e-03     # m/(s²·√Hz)
+gyroscope_random_walk = 1.9393e-05        # rad/(s²·√Hz)
+accelerometer_random_walk = 3.0e-03       # m/(s³·√Hz)
+frequency = 200.0                         # Hz
   [rig.imu.rig_from_imu]
-  translation = [0,0,0]
+  rotation = [0, 0, 0, 1]
+  translation = [0, 0, 0]
 ```
 
 ### `[odometry]`
-`odometry_mode` (`Multicamera`|`Inertial`|`RGBD`|`Mono`), `multicam_mode`
-(`Performance`|`Moderate`|`Precision`), `use_gpu`, `async_sba`,
-`use_motion_model`, `use_denoising`, `rectified_stereo_camera`,
-`enable_observations_export`, `enable_landmarks_export`,
-`enable_final_landmarks_export`, `max_frame_delta_s`, and nested
-`[odometry.rgbd]` (`depth_scale_factor`, `depth_camera_id`,
-`enable_depth_stereo_tracking`). Omitted optional knobs keep the library default.
+
+Maps to `cuvslam.Tracker.OdometryConfig`. Optional knobs left unset keep the
+library default.
+
+| Key | Type | Values / note |
+|---|---|---|
+| `odometry_mode` | str | `Multicamera` \| `Inertial` \| `RGBD` \| `Mono` |
+| `multicam_mode` | str | `Performance` \| `Moderate` \| `Precision` |
+| `use_gpu` | bool | GPU-accelerated feature work |
+| `async_sba` | bool | run bundle adjustment off the track() thread |
+| `use_motion_model` | bool | constant-velocity pose prediction |
+| `use_denoising` | bool | denoise input images |
+| `rectified_stereo_camera` | bool | set true only for rectified, row-aligned stereo |
+| `enable_observations_export` | bool | needed for viz / SLAM (default true) |
+| `enable_landmarks_export` | bool | needed for viz / SLAM (default true) |
+| `enable_final_landmarks_export` | bool | export final landmarks at end |
+| `max_frame_delta_s` | float | max time gap before a track reset |
+| `[odometry.rgbd]` | table | `depth_scale_factor`, `depth_camera_id`, `enable_depth_stereo_tracking` |
+
+For `tum`, `depth_scale_factor` is auto-filled from the rig yaml unless you set
+`[odometry.rgbd]` explicitly.
 
 ### `[slam]`
-Presence of this table enables SLAM. `map_cache_path`, `use_gpu`, `sync_mode`,
-`enable_reading_internals`, `planar_constraints`, `gt_align_mode`,
-`map_cell_size`, `max_landmarks_distance`, `max_map_size`, `throttling_time_ms`,
-plus optional `[slam.localize]` (`map_path`, `[slam.localize.guess]`, search
-radii/steps) to localize in an existing map before tracking.
 
-### `[output]`
-`trajectory` (TUM-format path), `pose_source` (`auto`|`odometry`|`slam`),
-`timestamp_unit` (`s`|`ms`|`us`|`ns`), `save_map` (folder, SLAM only),
-`visualize` (rerun), `print_every`.
+Presence of this table enables the SLAM layer (loop closure + pose graph) on top
+of odometry. Maps to `cuvslam.Tracker.SlamConfig`.
 
-### `[eval]` — accuracy metrics vs ground truth
-Add this table to evaluate automatically after tracking (the run summary then
-includes `ate_rmse_m`, `avg_rte_pct`, `avg_re_deg`):
+| Key | Type | Meaning |
+|---|---|---|
+| `enabled` | bool | default true when the table exists; set false to disable |
+| `map_cache_path` | str | persist the map to LMDB at this path (else in-memory) |
+| `use_gpu` | bool | GPU acceleration inside SLAM |
+| `sync_mode` | bool | run SLAM on the track() thread (deterministic, slow) vs async |
+| `enable_reading_internals` | bool | allow reading pose graph / landmarks |
+| `planar_constraints` | bool | constrain motion to a horizontal plane |
+| `gt_align_mode` | bool | special ground-truth-aligned mapping mode |
+| `map_cell_size` | float | map cell size (0 = auto from baseline) |
+| `max_landmarks_distance` | float | drop landmarks beyond this distance |
+| `max_map_size` | int | max pose-graph nodes (0 = unlimited) |
+| `throttling_time_ms` | int | min time between loop-closure events |
+| `[slam.localize]` | table | localize in an existing map before tracking (below) |
 
 ```toml
-[eval]
-ground_truth = "state_groundtruth_estimate0/data.csv"  # resolved against input root
-gt_format = "euroc"             # euroc | tum | kitti
-align = "auto"                  # auto | se3 | sim3 | none  (auto: sim3 for Mono, else se3)
-apply_gt_extrinsic = "auto"     # auto | euroc_cam0 | none  (move EuRoC body-frame GT -> cam0)
-max_time_diff = 0.02            # s, GT/estimate association window
-rpe_distances = [1, 2, 4, 8, 16]  # metres; or "kitti" for 100..800; omit for auto
-report = "out/eval.txt"         # optional
+[slam.localize]
+map_path = "out/kitti_06_map"
+horizontal_search_radius = 8.0
+vertical_search_radius = 2.0
+horizontal_step = 0.5
+vertical_step = 0.2
+angular_step_rads = 0.03
+  [slam.localize.guess]            # initial pose guess
+  rotation = [0, 0, 0, 1]
+  translation = [0, 0, 0]
 ```
 
-Metrics reported (also available standalone via `python evaluate.py est.txt gt …`):
+### `[output]`
 
-| Metric | Meaning | Unit |
+| Key | Type | Default | Meaning |
+|---|---|---|---|
+| `trajectory` | str | `""` | TUM-format output path (`""` = don't write) |
+| `pose_source` | str | `auto` | `auto` \| `odometry` \| `slam` (auto = slam if SLAM on) |
+| `timestamp_unit` | str | `s` | `s` \| `ms` \| `us` \| `ns` for the timestamp column |
+| `save_map` | str | `""` | folder to save the SLAM map (SLAM only) |
+| `visualize` | bool | `false` | live Rerun visualization if `rerun-sdk` is present |
+| `print_every` | int | `50` | progress print cadence (0 = silent) |
+
+### `[eval]`
+
+Optional. When present and enabled, the runner evaluates the produced trajectory
+against ground truth and folds `ate_rmse_m` / `avg_rte_pct` / `avg_re_deg` into
+the run summary.
+
+| Key | Type | Default | Meaning |
+|---|---|---|---|
+| `enabled` | bool | true if table present | turn evaluation on/off |
+| `ground_truth` | str | — | GT path (resolved against the input root if relative) |
+| `gt_format` | str | `euroc` | `euroc` \| `tum` \| `kitti` |
+| `gt_time_unit` | str | `s` | timestamp unit for `tum` GT |
+| `gt_fps` | float | `10` | index→time rate for `kitti` GT |
+| `align` | str | `auto` | `auto` \| `se3` \| `sim3` \| `none` (auto = sim3 for Mono, else se3) |
+| `apply_gt_extrinsic` | str | `auto` | `auto` \| `euroc_cam0` \| `none` (move EuRoC body-frame GT into the cam0 frame) |
+| `max_time_diff` | float | `0.02` | GT/estimate association window (s) |
+| `rpe_distances` | list/str | auto | metres list, or `"kitti"` for 100…800 m |
+| `report` | str | `""` | optional path to write the text report |
+
+---
+
+## Choosing a mode
+
+| `odometry_mode` | Sensors | Scale | Use when |
+|---|---|---|---|
+| `Multicamera` | ≥1 synchronized cameras (stereo, or N stereo pairs) | metric | default; robust outdoor/indoor, occlusion tolerance with more cameras |
+| `Inertial` | stereo + IMU | metric | aggressive motion / motion blur; needs good IMU noise params |
+| `RGBD` | 1 camera + aligned depth | metric | indoor with a depth sensor; `enable_depth_stereo_tracking` to add the stereo partner |
+| `Mono` | 1 camera | up-to-scale | quick "does it track?" checks; rotation accurate, translation needs Sim3 scale alignment to evaluate |
+
+`MulticameraMode`: `Performance` (features from the primary camera only — fast),
+`Moderate`, `Precision` (all cameras — most accurate).
+
+---
+
+## Evaluation metrics explained
+
+`eval.py` associates each estimated pose to the nearest ground-truth pose by
+timestamp, aligns the trajectories, and reports:
+
+| Metric | Definition | Unit |
 |---|---|---|
-| **ATE / RMSE APE** | RMS absolute position error after rigid (SE3) / similarity (Sim3) alignment | m |
-| **avgRTE** | average relative translation error (RPE), drift per distance | % |
-| **RPE rotation** | relative rotation drift per distance | deg/m |
-| **avgRE** | average relative rotation error per segment | deg |
+| **ATE / RMSE APE** | RMS of per-frame position error after global alignment | m (printed also in cm) |
+| **avgRTE** | mean relative **translation** error over fixed travelled-distance segments | % of distance |
+| **RPE rotation** | mean relative **rotation** error per travelled metre | deg/m |
+| **avgRE** | mean relative rotation error per segment (not distance-normalized) | deg |
 
-RPE/avgRTE/avgRE are KITTI-style: relative pose errors over fixed travelled-distance
-segments, averaged over all start frames and all segment lengths. Alignment uses
-Umeyama (1991); Sim3 estimates a global scale for monocular runs.
+Plus APE mean/median/std/min/max and a per-segment-length breakdown.
 
-### Validated benchmark (EuRoC V1_01, stereo, cu13 wheel)
-`configs/euroc_v1_eval.toml` produces, against the Vicon ground truth
-(2912 frames, 0 failures, GT moved into the cam0 frame, SE3 alignment):
+**How it's computed**
+
+1. **Association** — nearest GT timestamp within `max_time_diff` (default 20 ms).
+2. **Alignment** — Umeyama (1991) least-squares fit of estimate→GT positions.
+   `se3` is rigid (rotation+translation); `sim3` additionally solves a global
+   scale (use for monocular, which is scale-free). `none` skips alignment.
+3. **ATE** — Euclidean position error of every aligned pose; report the RMS.
+4. **RPE (KITTI-style)** — for each segment length `L`, slide a window over the
+   trajectory, take the relative motion `Pᵢ⁻¹Pⱼ` over a sub-path of length `L`
+   in both GT and estimate, and measure the residual
+   `E = (relGT)⁻¹(relEST)`. Translation error is `‖trans(E)‖ / L` (→ %) and
+   rotation error is `angle(rot(E)) / L` (→ deg/m). Averaging over all windows
+   and lengths gives **avgRTE %** and **RPE deg/m**; the un-normalized mean of
+   `angle(rot(E))` gives **avgRE deg**.
+
+**Frame note (EuRoC):** ground truth is in the IMU/body frame while cuVSLAM
+outputs the cam0 frame. With `apply_gt_extrinsic = "euroc_cam0"` (the default for
+EuRoC) the GT is right-multiplied by cam0's `T_BS` so both share the cam0 frame —
+important for a correct rotation RPE. ATE after alignment is robust either way.
+
+**Ground-truth formats**
+- `euroc`: `state_groundtruth_estimate0/data.csv` (`ts[ns], px,py,pz, qw,qx,qy,qz, …`).
+- `tum`: `ts tx ty tz qx qy qz qw` (set `gt_time_unit`).
+- `kitti`: 12 numbers/line (3×4 row-major); index-timed at `gt_fps`. Note KITTI
+  GT poses are a **separate download** from the odometry images.
+
+---
+
+## Validated benchmark results
+
+Run against the `cuvslam-15.0.0+cu13` wheel on **EuRoC V1_01_easy** (Vicon Room),
+stereo (`Multicamera`), 2912 frames, 0 tracking failures, GT moved into the cam0
+frame, SE3 alignment (`configs/euroc_v1_eval.toml`):
 
 ```
-ATE / RMSE APE : 7.78 cm
+ATE / RMSE APE : 7.78 cm        (0.0778 m)
+APE mean/median: 0.0704 / 0.0674 m
 avgRTE         : 5.23 %
 RPE rotation   : 0.67 deg/m
 avgRE          : 2.34 deg
+  len(m)  trans%   rot(deg/m)
+    1.0   8.147    1.0357
+    2.0   6.890    0.8983
+    4.0   5.546    0.7032
+    8.0   3.193    0.4277
+   16.0   1.412    0.1784
 ```
 
-KITTI ATE/RPE works the same way with `gt_format = "kitti"` once you supply the
-KITTI ground-truth `poses/<seq>.txt` (a separate download from the odometry
-images), or the standalone `evaluate.py ... --gt-format kitti`.
+RPE shrinking with segment length is the expected signature (short segments are
+dominated by per-frame noise; long segments by genuine drift). Stereo-inertial on
+the same sequence also runs cleanly; tune the IMU noise params for best results
+(the default EuRoC `sensor.yaml` values are known to be loose — the repo's euroc
+example ships recalibrated yamls).
 
-## Notes
-- Only debug knobs (`debug_dump_directory`, `debug_imu_mode`) are intentionally
-  not exposed.
-- Trajectory output is `timestamp tx ty tz qx qy qz qw` (TUM format).
-- The example configs use paths relative to this directory pointing at the
-  repository's `../examples/*/dataset/...`; adjust to your data.
+---
+
+## Bundled configs
+
+| Config | Source | Mode | Notes |
+|---|---|---|---|
+| `kitti_stereo.toml` | image_folder | Multicamera | repo KITTI example; explicit rig |
+| `kitti_slam.toml` | image_folder | Multicamera + SLAM | loop closure + `save_map` |
+| `euroc_inertial.toml` | euroc | Inertial | rig+IMU from dataset yaml |
+| `euroc_mono.toml` | euroc | Mono | vision-only sanity check |
+| `euroc_v1_eval.toml` | euroc | Multicamera + **eval** | the validated ATE/RPE benchmark |
+| `tum_rgbd.toml` | tum | RGBD | depth scale auto from rig yaml; border masks |
+| `tartan_multicam.toml` | edex | Multicamera | 12-camera (6 stereo) rig |
+| `robotcar_mono.toml` | image_folder | Mono | Bayer demosaic + hood mask (arbitrary dataset) |
+| `generic_inertial.toml` | image_folder + `[input.imu]` | Inertial | **any** folder+IMU dataset → inertial |
+| `usb_stereo_video.toml` | video | Multicamera | USB stereo, side-by-side split |
+| `webcam_mono.toml` | video | Mono | live webcam |
+| `realsense_stereo.toml` | realsense | Multicamera | live RealSense |
+
+---
+
+## Recipes
+
+**Bring your own recorded dataset (stereo, with timestamps file)**
+```toml
+[input]
+type = "image_folder"
+root = "/data/my_seq"
+  [[input.cameras]]
+  images = "left/*.png"
+  [[input.cameras]]
+  images = "right/*.png"
+  [input.timestamps]
+  mode = "file"
+  path = "timestamps.txt"
+  unit = "ns"
+# + an explicit [rig] with your calibration, + [odometry] odometry_mode="Multicamera"
+```
+
+**Turn any recorded folder dataset into a stereo-inertial run** — add `[input.imu]`
+(see `generic_inertial.toml`) and set `odometry_mode = "Inertial"` plus `[rig.imu]`.
+
+**Live monocular from a webcam** — `configs/webcam_mono.toml` (`type="video"`,
+`source="0"`, `mode="wallclock"`).
+
+**Evaluate a trajectory you already have**
+```bash
+python evaluate.py est_tum.txt /data/seq/mav0/state_groundtruth_estimate0/data.csv \
+  --gt-format euroc --euroc-cam0-yaml /data/seq/mav0/cam0/sensor.yaml \
+  --align se3 --rpe-distances 1,2,4,8,16
+# KITTI:
+python evaluate.py est_tum.txt poses/06.txt --gt-format kitti --align se3 --rpe-distances kitti
+```
+
+---
+
+## Coordinate conventions
+
+- cuVSLAM uses the OpenCV camera frame: **x right, y down, z forward**.
+- Poses are `world_from_rig`; the rig frame is defined by your extrinsics
+  (typically the first/primary camera is the rig origin).
+- Quaternions are `[x, y, z, w]` everywhere in the TOML and outputs.
+- Trajectory files are TUM format: `timestamp tx ty tz qx qy qz qw`.
+- 3-channel images are converted RGB→BGR on load by default (`bgr = true`),
+  matching the cuVSLAM example pipeline; depth is `uint16`.
+
+---
+
+## Extending the system
+
+Add a new input source in three steps:
+
+1. Create `cuvslam_runner/sources/my_source.py` with a class subclassing
+   `FrameSource`. Implement `__iter__` (yield `FrameEvent`/`ImuEvent` in ascending
+   timestamp order), set `self.num_cameras`, and optionally `build_rig_spec()` and
+   `__len__`.
+2. Register it in `sources/__init__.py`'s `_REGISTRY`
+   (`"my_type": ("cuvslam_runner.sources.my_source", "MySource")`). It's imported
+   lazily, so optional third-party deps only load when that type is requested.
+3. Write a config with `type = "my_type"`. Nothing in `builders.py`/`runner.py`
+   needs to change.
+
+Sources emit plain dataclasses (`specs.py`), never `cuvslam` objects — keep the
+parsing layer cuVSLAM-free so it stays testable with `--check`.
+
+---
+
+## Testing
+
+```bash
+python tests/test_smoke.py          # or: python -m pytest tests/
+```
+
+The smoke tests run **without `cuvslam`**: config parse + key validation,
+`image_folder` enumeration, timestamp modes, IMU merge ordering, optional video
+source guard, image helpers, and the evaluation math (which is checked to be
+exact under rigid/Sim3 transforms and sane under injected drift).
+
+Validate any config offline with:
+```bash
+python run.py configs/<name>.toml --check
+```
+which parses the TOML, wires the source, resolves the rig, and reports the frame
+count — all without importing `cuvslam`.
+
+---
+
+## Troubleshooting
+
+| Symptom | Likely cause / fix |
+|---|---|
+| `No TOML parser available` | Python < 3.11 without tomli → `pip install tomli` |
+| `type='video' needs opencv-python` | `pip install opencv-python` |
+| `type='realsense' needs pyrealsense2` | install pyrealsense2 + connect a camera |
+| `Bayer demosaicing requires opencv-python` | install opencv, or drop `bayer=` |
+| `… does not provide calibration; define an explicit [rig]` | add `[[rig.cameras]]` (image_folder/video can't infer intrinsics) |
+| `Only N GT/estimate matches …` | wrong `gt_format`/units, or widen `max_time_diff` |
+| Many "Failed to track frame" | check sync/timestamps, calibration, `rectified_stereo_camera`, frame rate; see the repo's main Performance notes |
+| RPE rotation looks inflated on EuRoC | ensure `apply_gt_extrinsic` moved GT to the cam0 frame |
+| SLAM poses "jump" | expected at loop closures; use async SLAM and read smoothed poses, or `sync_mode` for determinism |
+
+---
+
+*This harness is a thin wrapper; the underlying tracking, accuracy, and platform
+guidance live in the main cuVSLAM repository README and technical report
+(arXiv:2506.04359).*
