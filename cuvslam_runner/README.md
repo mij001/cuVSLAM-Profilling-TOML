@@ -93,6 +93,23 @@ pip install -r requirements.txt
 pip install cuvslam-15.0.0+cu13-cp310-cp310-manylinux_2_35_x86_64.whl
 ```
 
+> Make sure the wheel matches your CUDA runtime (e.g. a `cu11`-built wheel needs
+> `libcusolver.so.11` on the library path; a `cu13` build needs CUDA 13).
+
+**One-shot setup + run + teardown.** `setup_and_run.sh` builds a throwaway
+Python 3.10 venv, installs `requirements.txt` and the newest `../dist/cuvslam-*.whl`,
+verifies the import, runs the smoke tests, optionally runs configs you pass, and
+**removes the venv on exit** (even on failure):
+
+```bash
+./setup_and_run.sh                              # install + verify + smoke tests + validate configs
+./setup_and_run.sh configs/euroc_v1_eval.toml   # also track + evaluate this config
+KEEP_VENV=1 ./setup_and_run.sh                  # keep the venv for reuse
+WHEEL=/path/to/cuvslam-*.whl PYBIN=python3.10 ./setup_and_run.sh   # overrides
+```
+If the wheel can't be imported (e.g. CUDA mismatch), it says so and falls back to
+config validation instead of tracking.
+
 **Dependencies**
 
 | Package | Needed for |
