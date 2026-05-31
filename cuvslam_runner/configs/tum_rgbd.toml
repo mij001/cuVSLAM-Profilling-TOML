@@ -37,3 +37,11 @@ border_right = 50
 trajectory = "out/tum_fr3_rgbd_tum.txt"
 timestamp_unit = "s"
 visualize = false
+
+[eval]
+ground_truth = "groundtruth.txt"   # TUM RGB-D ships this (timestamp tx ty tz qx qy qz qw)
+gt_format = "tum"
+gt_time_unit = "s"
+align = "se3"
+rpe_distances = [0.25, 0.5, 1, 2]
+report = "out/tum_fr3_rgbd_eval.txt"

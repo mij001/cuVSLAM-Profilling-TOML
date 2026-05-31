@@ -1,0 +1,47 @@
+# Paper benchmark: AR-table (Chen et al. 2023), Mono-Depth / RGBD mode.
+# AR-table ships synchronized RGB + depth frames. This config uses the generic
+# image_folder source (rgb folder + aligned depth folder). Adjust the globs,
+# timestamp source, intrinsics and depth scale to match your download.
+#
+# If your copy provides rgb.txt/depth.txt association files instead of parallel
+# folders, switch to the `tum` source (see iclnuim_rgbd.toml).
+
+[run]
+verbosity = 1
+
+[input]
+type = "image_folder"
+root = "datasets/artable/<sequence>"
+
+  [[input.cameras]]
+  images = "rgb/*.png"
+  depth  = "depth/*.png"           # aligned uint16 depth
+
+  [input.timestamps]
+  mode = "filename"                # or "file" with a times.txt, or "fps"
+  unit = "s"
+
+[odometry]
+odometry_mode = "RGBD"
+async_sba = true
+enable_final_landmarks_export = true
+  [odometry.rgbd]
+  depth_scale_factor = 1000.0      # <-- set to your depth units (e.g. 1000 mm, 5000 TUM)
+  depth_camera_id = 0
+
+# <-- replace with the AR-table camera intrinsics
+[[rig.cameras]]
+size = [640, 480]
+focal = [600.0, 600.0]
+principal = [320.0, 240.0]
+
+[output]
+trajectory = "out/artable_tum.txt"
+timestamp_unit = "s"
+
+# AR-table provides ground truth; point [eval] at it (TUM format shown).
+# [eval]
+# ground_truth = "groundtruth.txt"
+# gt_format = "tum"
+# align = "se3"
+# rpe_distances = [0.25, 0.5, 1, 2]

@@ -566,6 +566,20 @@ example ships recalibrated yamls).
 | `usb_stereo_video.toml` | video | Multicamera | USB stereo, side-by-side split |
 | `webcam_mono.toml` | video | Mono | live webcam |
 | `realsense_stereo.toml` | realsense | Multicamera | live RealSense |
+| `iclnuim_rgbd.toml` | tum | RGBD | paper: ICL-NUIM (+ TUM-format eval) |
+| `artable_rgbd.toml` | image_folder | RGBD | paper: AR-table (template) |
+| `tumvi_room_inertial.toml` | image_folder + `[input.imu]` | Inertial | paper: TUM-VI room (fisheye + mocap eval) |
+| `tartanair_v2_multicam.toml` | edex | Multicamera | paper: TartanAir V2 (12-cam) |
+| `r2b_multicam.toml` | edex (jsonl) | Multicamera | paper: R2B (4 stereo) |
+
+## Paper benchmark coverage
+
+Every dataset benchmarked in the cuVSLAM technical report (arXiv:2506.04359,
+Tables 2 & 3) has a ready config — see **[PAPER_DATASETS.md](PAPER_DATASETS.md)**
+for the full dataset → config → source → eval mapping. The runner reports the
+paper's own metrics (`avgRTE %`, `avgRE deg`, `RMSE APE`). EuRoC and KITTI are
+validated here against the cu13 wheel; the rest ship schema-valid configs with
+published calibration to fill in for your specific download.
 
 ---
 
