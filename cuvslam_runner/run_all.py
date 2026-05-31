@@ -23,8 +23,10 @@ import ast
 import glob
 import os
 import re
+import shlex
 import subprocess
 import sys
+import threading
 import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -70,22 +72,53 @@ def _first_error(text: str) -> str:
     return "(no output)"
 
 
-def run_one(config: str, python: str, check: bool, timeout: float, log_dir: str) -> dict:
+def run_one(config: str, python: str, check: bool, timeout: float, log_dir: str,
+            stream: bool = True) -> dict:
     cmd = [python, RUN_PY, config] + (["--check"] if check else [])
+    # Always show the exact command being executed.
+    print("    $ " + " ".join(shlex.quote(c) for c in cmd), flush=True)
+
     start = time.time()
+    # Merge stderr into stdout and read line-by-line so the runner's own output
+    # and any Python tracebacks are shown in full (nothing is hidden/captured-away).
+    proc = subprocess.Popen(
+        cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        text=True, bufsize=1,
+    )
+    timed_out = {"v": False}
+    timer = None
+    if timeout > 0:
+        def _kill():
+            timed_out["v"] = True
+            proc.kill()
+        timer = threading.Timer(timeout, _kill)
+        timer.start()
+
+    buf = []
     try:
-        proc = subprocess.run(
-            cmd, capture_output=True, text=True,
-            timeout=(timeout if timeout > 0 else None),
-        )
-        elapsed = time.time() - start
-        out = proc.stdout + "\n" + proc.stderr
+        for line in proc.stdout:
+            buf.append(line)
+            if stream:
+                sys.stdout.write("      | " + line)
+                sys.stdout.flush()
+        proc.wait()
+    finally:
+        if timer is not None:
+            timer.cancel()
+    elapsed = time.time() - start
+    out = "".join(buf)
+
+    if timed_out["v"]:
+        status, rc = "TIMEOUT", None
+    else:
         status = "OK" if proc.returncode == 0 else "FAIL"
         rc = proc.returncode
-    except subprocess.TimeoutExpired as exc:
-        elapsed = time.time() - start
-        out = (exc.stdout or "") + "\n" + (exc.stderr or "")
-        status, rc = "TIMEOUT", None
+
+    # On failure, if we were NOT streaming, dump the full output so error
+    # traces are never hidden.
+    if status != "OK" and not stream:
+        sys.stdout.write(out if out.endswith("\n") else out + "\n")
+        sys.stdout.flush()
 
     if log_dir:
         os.makedirs(log_dir, exist_ok=True)
@@ -153,6 +186,8 @@ def main(argv=None) -> int:
                    help="interpreter used to run each config (default: this one)")
     p.add_argument("--log-dir", default=os.path.join(HERE, "out", "run_all"),
                    help="where to write per-config logs ('' to disable)")
+    p.add_argument("--quiet", action="store_true",
+                   help="don't stream each config's output live (still shown in full on failure)")
     args = p.parse_args(argv)
 
     configs = discover(args.configs)
@@ -175,7 +210,8 @@ def main(argv=None) -> int:
     results = []
     for i, cfg in enumerate(configs, 1):
         print(f"\n[{i}/{len(configs)}] {_name(cfg)} ...", flush=True)
-        r = run_one(cfg, args.python, args.check, args.timeout, args.log_dir)
+        r = run_one(cfg, args.python, args.check, args.timeout, args.log_dir,
+                    stream=not args.quiet)
         tag = r["status"] + (f" — {r['reason']}" if r["status"] != "OK" and r.get("reason") else "")
         print(f"    -> {tag} ({r['elapsed']:.1f}s)")
         results.append(r)

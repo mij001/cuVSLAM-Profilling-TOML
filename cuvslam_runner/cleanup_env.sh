@@ -24,21 +24,25 @@ for arg in "$@"; do
     esac
 done
 
+# Echo each command before running it (so every executed command is visible).
+run() { echo "+ $*"; "$@"; }
+
 if [ -n "${VIRTUAL_ENV:-}" ] && [ "${VIRTUAL_ENV}" = "$VENV" ]; then
     echo "[cleanup] note: this venv looks active — run 'deactivate' in your shell afterwards."
 fi
 
 if [ -d "$VENV" ]; then
-    rm -rf "$VENV"
+    run rm -rf "$VENV"
     echo "[cleanup] removed $VENV"
 else
     echo "[cleanup] no venv at $VENV (nothing to remove)"
 fi
 
 if [ "$CLEAN_OUTPUTS" = "1" ] && [ -d "$HERE/out" ]; then
-    rm -rf "$HERE/out"
+    run rm -rf "$HERE/out"
     echo "[cleanup] removed $HERE/out"
 fi
 
+echo "+ find $HERE -name __pycache__ -type d -prune -exec rm -rf {} +"
 find "$HERE" -name '__pycache__' -type d -prune -exec rm -rf {} + 2>/dev/null || true
 echo "[cleanup] done"

@@ -20,23 +20,26 @@ PYBIN="${PYBIN:-python3.10}"
 VENV="${VENV:-$HERE/cuvslam_venv}"
 WHEEL="${WHEEL:-$(ls -t "$HERE"/../dist/cuvslam-*.whl 2>/dev/null | head -1 || true)}"
 
+# Echo each command before running it (so every executed command is visible).
+run() { echo "+ $*"; "$@"; }
+
 if [ -d "$VENV" ]; then
     echo "[setup] reusing existing venv at $VENV"
     echo "        (delete it or run ./cleanup_env.sh first to recreate)"
 else
     echo "[setup] creating venv with $PYBIN ..."
-    "$PYBIN" -m venv "$VENV"
+    run "$PYBIN" -m venv "$VENV"
 fi
 
 PY="$VENV/bin/python"
-"$PY" -m pip install --upgrade pip >/dev/null || true
+run "$PY" -m pip install --upgrade pip || true
 
 echo "[setup] installing requirements ..."
-"$PY" -m pip install -r requirements.txt
+run "$PY" -m pip install -r requirements.txt
 
 if [ -n "$WHEEL" ] && [ -f "$WHEEL" ]; then
     echo "[setup] installing cuVSLAM wheel: $WHEEL"
-    "$PY" -m pip install "$WHEEL"
+    run "$PY" -m pip install "$WHEEL"
 else
     echo "[setup] WARNING: no cuVSLAM wheel found in ../dist (set WHEEL=...);" \
          "tracking will be unavailable, only --check validation will work." >&2

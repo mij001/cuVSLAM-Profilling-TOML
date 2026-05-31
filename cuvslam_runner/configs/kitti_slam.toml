@@ -8,7 +8,7 @@ sleep_ms = 10            # give the async SLAM thread time to catch up
 
 [input]
 type = "image_folder"
-root = "../examples/kitti/dataset/sequences/06"
+root = "../cuvslam_datasets/dataset/sequences/06"
 
   [[input.cameras]]
   images = "image_0/*.png"
@@ -31,17 +31,18 @@ enable_final_landmarks_export = true
 enabled = true
 sync_mode = false        # async (recommended); set true for deterministic localization
 
+# Intrinsics transcribed from this dataset's sequences/06/calib.txt (P0/P1).
 [[rig.cameras]]
-size = [1241, 376]
-focal = [718.856, 718.856]
-principal = [607.1928, 185.2157]
+size = [1226, 370]
+focal = [707.0912, 707.0912]
+principal = [601.8873, 183.1104]
 
 [[rig.cameras]]
-size = [1241, 376]
-focal = [718.856, 718.856]
-principal = [607.1928, 185.2157]
+size = [1226, 370]
+focal = [707.0912, 707.0912]
+principal = [601.8873, 183.1104]
   [rig.cameras.rig_from_camera]
-  translation = [0.537150653, 0.0, 0.0]
+  translation = [0.5371655, 0.0, 0.0]   # baseline = -P1[0,3]/fx = 379.8145/707.0912
 
 [output]
 trajectory = "out/kitti_06_slam_tum.txt"

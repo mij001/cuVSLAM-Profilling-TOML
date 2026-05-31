@@ -601,8 +601,11 @@ euroc_v1_stereo              OK          2912    0.0778    5.23    121.4
 2/2 succeeded
 ```
 
-Failed/skipped configs show a one-line reason (missing dataset, no camera, etc.),
-and full output for every config is saved under `out/run_all/<name>.log`.
+Each config's exact command is echoed (`$ python run.py …`) and its output —
+including any Python traceback — is **streamed live** (prefixed with `| `), so
+nothing is hidden. Pass `--quiet` to suppress the live stream (the full output
+is still printed on failure and always saved under `out/run_all/<name>.log`).
+`run_list.py` behaves identically and writes to `out/run_list/`.
 
 ## Recipes
 

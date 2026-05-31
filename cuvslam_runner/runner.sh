@@ -65,12 +65,15 @@ if ! _can_import_cuvslam "$PY"; then
     echo "           set CUVSLAM_PYTHON=/path/to/python with the wheel installed." >&2
 fi
 
+# Echo the exact command, then replace this shell with it.
+runexec() { echo "+ $*" >&2; exec "$@"; }
+
 cmd="$1"; shift || true
 case "$cmd" in
-    all)    exec "$PY" "$HERE/run_all.py"  "$@" ;;
-    eval)   exec "$PY" "$HERE/evaluate.py" "$@" ;;
-    check)  exec "$PY" "$HERE/run.py"      "$@" --check ;;
-    python) exec "$PY" "$@" ;;
+    all)    runexec "$PY" "$HERE/run_all.py"  "$@" ;;
+    eval)   runexec "$PY" "$HERE/evaluate.py" "$@" ;;
+    check)  runexec "$PY" "$HERE/run.py"      "$@" --check ;;
+    python) runexec "$PY" "$@" ;;
     -h|--help|help) usage ;;
-    *)      exec "$PY" "$HERE/run.py" "$cmd" "$@" ;;
+    *)      runexec "$PY" "$HERE/run.py" "$cmd" "$@" ;;
 esac

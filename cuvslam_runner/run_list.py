@@ -61,6 +61,8 @@ def main(argv=None) -> int:
                    help="per-config timeout in seconds (0 = no limit)")
     p.add_argument("--log-dir", default=os.path.join(HERE, "out", "run_list"),
                    help="where to write per-config logs ('' to disable)")
+    p.add_argument("--quiet", action="store_true",
+                   help="don't stream each config's output live (still shown in full on failure)")
     args = p.parse_args(argv)
 
     if not os.path.exists(args.list_file):
@@ -86,7 +88,8 @@ def main(argv=None) -> int:
                             "returncode": None, "elapsed": 0.0, "summary": {},
                             "reason": "config file not found"})
             continue
-        r = run_all.run_one(cfg, python, args.check, args.timeout, args.log_dir)
+        r = run_all.run_one(cfg, python, args.check, args.timeout, args.log_dir,
+                            stream=not args.quiet)
         tag = r["status"] + (f" — {r['reason']}" if r["status"] != "OK" and r.get("reason") else "")
         print(f"    -> {tag} ({r['elapsed']:.1f}s)")
         results.append(r)
