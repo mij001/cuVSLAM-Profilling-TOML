@@ -20,6 +20,23 @@ python run_all.py                                   # run every config + summary
 python run_all.py --check                           # validate every config
 ```
 
+Or use the **`runner.sh`** launcher, which finds a Python that has `cuvslam`,
+sets `PYTHONPATH`, and dispatches — no venv/PYTHONPATH juggling:
+
+```bash
+./runner.sh configs/euroc_v1_eval.toml      # run one config        (-> run.py)
+./runner.sh check configs/kitti_stereo.toml  # validate one config   (-> run.py --check)
+./runner.sh all                              # run every config      (-> run_all.py)
+./runner.sh eval est.txt gt.csv --gt-format euroc   # evaluate         (-> evaluate.py)
+# Override the interpreter explicitly when needed:
+CUVSLAM_PYTHON=/path/to/venv/bin/python ./runner.sh configs/tum_rgbd.toml
+```
+
+Interpreter search order: `$CUVSLAM_PYTHON` → `./.venv/bin/python` →
+`../../wheel/cuvslam_env/bin/python` (this repo's layout) → `python3`/`python`.
+The first one that can `import cuvslam` wins; otherwise the first that exists
+(so `check` still works without the wheel).
+
 ---
 
 ## Table of contents
