@@ -48,4 +48,4 @@ principal = [601.8873, 183.1104]
 trajectory = "out/kitti_06_slam_tum.txt"
 pose_source = "slam"
 save_map = "out/kitti_06_map"
-visualize = false
+visualize = true
