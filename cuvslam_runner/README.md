@@ -16,6 +16,8 @@ python run.py configs/euroc_v1_eval.toml            # run + evaluate vs ground t
 python run.py configs/kitti_stereo.toml --check     # validate config only (no cuvslam import)
 python -m cuvslam_runner configs/tum_rgbd.toml      # equivalent module form
 python evaluate.py est.txt gt.csv --gt-format euroc # evaluate an existing trajectory
+python run_all.py                                   # run every config + summary table
+python run_all.py --check                           # validate every config
 ```
 
 ---
@@ -39,6 +41,7 @@ python evaluate.py est.txt gt.csv --gt-format euroc # evaluate an existing traje
 - [Evaluation metrics explained](#evaluation-metrics-explained)
 - [Validated benchmark results](#validated-benchmark-results)
 - [Bundled configs](#bundled-configs)
+- [Running all configs](#running-all-configs)
 - [Recipes](#recipes)
 - [Coordinate conventions](#coordinate-conventions)
 - [Extending the system](#extending-the-system)
@@ -520,6 +523,41 @@ example ships recalibrated yamls).
 | `realsense_stereo.toml` | realsense | Multicamera | live RealSense |
 
 ---
+
+## Running all configs
+
+`run_all.py` executes (or validates) every `configs/*.toml` in turn. Each config
+runs in its **own subprocess**, so a missing dataset, an absent camera, or a
+crash in one never stops the rest. At the end it prints a summary table and
+writes a per-config log; the exit code is 0 only if every selected config
+succeeded.
+
+```bash
+python run_all.py                          # run every config in ./configs
+python run_all.py --check                  # validate only (no cuvslam, no tracking)
+python run_all.py --configs configs        # explicit directory or glob
+python run_all.py --only euroc_v1_eval,kitti_stereo
+python run_all.py --skip realsense_stereo,webcam_mono
+python run_all.py --timeout 600            # per-config seconds (0 = no limit)
+python run_all.py --python /path/to/venv/bin/python   # interpreter for each run
+```
+
+It parses each run's `[runner] done: {…}` line, so the table includes the frame
+count and — when `[eval]` is set — the ATE and avgRTE:
+
+```
+================================================================================
+SUMMARY
+================================================================================
+config                       status    frames    ATE(m)    RTE%  time(s)  note
+euroc_v1_inertial            OK          2912    0.1688    5.58     99.0
+euroc_v1_stereo              OK          2912    0.0778    5.23    121.4
+--------------------------------------------------------------------------------
+2/2 succeeded
+```
+
+Failed/skipped configs show a one-line reason (missing dataset, no camera, etc.),
+and full output for every config is saved under `out/run_all/<name>.log`.
 
 ## Recipes
 
