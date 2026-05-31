@@ -1,12 +1,15 @@
 # Paper benchmark: TUM-VI (Schubert et al. 2018), Stereo-Inertial mode (Room seqs).
-# TUM-VI ships in EuRoC/ASL layout (mav0/cam0|cam1/data, mav0/imu0/data.csv,
-# mav0/mocap0/data.csv) but with FISHEYE (equidistant) cameras, so we drive it
-# through the generic image_folder source + [input.imu] + an explicit fisheye
-# [rig]. Ground truth is the mocap0 stream (same column order as EuRoC GT).
 #
-# IMPORTANT: the calibration below is the published TUM-VI 512x16 camchain.
-# Verify/replace it with the exact values from your download's
-# camchain-imucam-*.yaml and imu config before trusting the numbers.
+# IMPORTANT (Appendix A.1.2): the paper used UNDISTORTED 512x512 images with a
+# 50-pixel mask along each edge. TUM-VI's raw cameras are ~195 deg-FOV fisheye,
+# which exceeds cuVSLAM's pinhole+undistort fisheye support (<180 deg), so the
+# images must be undistorted to a pinhole model BEFORE tracking (the paper did
+# this). Point the globs below at your undistorted 512x512 frames and set the
+# pinhole intrinsics from your undistortion.
+#
+# TUM-VI ships in EuRoC/ASL layout (mav0/cam0|cam1/data, mav0/imu0/data.csv,
+# mav0/mocap0/data.csv), so we drive it via image_folder + [input.imu], with the
+# mocap0 stream (EuRoC column order) as ground truth. Rooms room1..room6 (Table 4).
 #
 # Download: https://cvg.cit.tum.de/data/datasets/visual-inertial-dataset
 
@@ -18,18 +21,18 @@ type = "image_folder"
 root = "datasets/tumvi/dataset-room1_512_16/mav0"
 
   [[input.cameras]]
-  images = "cam0/data/*.png"
+  images = "cam0_undistorted/*.png"   # <-- undistorted (pinhole) 512x512 frames
 
   [[input.cameras]]
-  images = "cam1/data/*.png"
+  images = "cam1_undistorted/*.png"
 
   [input.timestamps]
-  mode = "filename"                # TUM-VI frames are <timestamp_ns>.png
+  mode = "filename"                   # TUM-VI frames are <timestamp_ns>.png
   unit = "ns"
 
   [input.imu]
   path = "imu0/data.csv"
-  format = "euroc"                 # timestamp[ns], wx,wy,wz, ax,ay,az
+  format = "euroc"                    # timestamp[ns], wx,wy,wz, ax,ay,az
 
 [odometry]
 odometry_mode = "Inertial"
@@ -37,25 +40,28 @@ rectified_stereo_camera = false
 async_sba = false
 enable_final_landmarks_export = true
 
-# ---- TUM-VI 512x16 calibration (cam0 = rig origin) — VERIFY against your yaml ----
+# Pinhole intrinsics of the UNDISTORTED images (set from your undistortion K).
+# 50-px edge masks per the paper.
 [[rig.cameras]]
 size = [512, 512]
-focal = [190.97847, 190.97331]
-principal = [254.93171, 256.89744]
-  [rig.cameras.distortion]
-  model = "Fisheye"               # equidistant (k1..k4)
-  parameters = [0.00348239, 0.00071503, -0.00205324, 0.00020294]
+focal = [190.0, 190.0]              # <-- replace with undistorted pinhole fx, fy
+principal = [256.0, 256.0]          # <-- replace with undistorted cx, cy
+border_top = 50
+border_bottom = 50
+border_left = 50
+border_right = 50
 
 [[rig.cameras]]
 size = [512, 512]
-focal = [190.44237, 190.43444]
-principal = [252.59666, 254.91793]
+focal = [190.0, 190.0]
+principal = [256.0, 256.0]
+border_top = 50
+border_bottom = 50
+border_left = 50
+border_right = 50
   [rig.cameras.rig_from_camera]
-  translation = [0.10107054, 0.0, 0.0]   # ~0.101 m baseline; replace w/ exact T_cam0_cam1
+  translation = [0.10107054, 0.0, 0.0]   # ~0.101 m baseline; use exact T_cam0_cam1
   rotation = [0.0, 0.0, 0.0, 1.0]
-  [rig.cameras.distortion]
-  model = "Fisheye"
-  parameters = [0.00340032, 0.00176623, -0.00266166, 0.00095164]
 
 [rig.imu]
 gyroscope_noise_density = 0.00016
@@ -73,5 +79,5 @@ ground_truth = "mocap0/data.csv"   # TUM-VI mocap, EuRoC column order
 gt_format = "euroc"
 align = "se3"
 apply_gt_extrinsic = "none"        # mocap frame; rigid alignment handles the offset
-rpe_distances = [1, 2, 4, 8]
+rpe_distances = [1, 2, 4, 8]       # note: paper reports RMSE RPE over 1-second segments
 report = "out/tumvi_room1_eval.txt"

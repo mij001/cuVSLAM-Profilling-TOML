@@ -566,6 +566,7 @@ example ships recalibrated yamls).
 | `usb_stereo_video.toml` | video | Multicamera | USB stereo, side-by-side split |
 | `webcam_mono.toml` | video | Mono | live webcam |
 | `realsense_stereo.toml` | realsense | Multicamera | live RealSense |
+| `kitti_eval.toml` | image_folder | Multicamera + **eval** | paper: KITTI seq, 100–800 m segment RPE |
 | `iclnuim_rgbd.toml` | tum | RGBD | paper: ICL-NUIM (+ TUM-format eval) |
 | `artable_rgbd.toml` | image_folder | RGBD | paper: AR-table (template) |
 | `tumvi_room_inertial.toml` | image_folder + `[input.imu]` | Inertial | paper: TUM-VI room (fisheye + mocap eval) |
